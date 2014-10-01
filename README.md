@@ -3,7 +3,7 @@ OkHttp -- VicV Flavor
 
 An HTTP & SPDY client for Android and Java applications. For more information see [the website][1] and [the wiki][2].
 
-VicV flavor
+#####VicV flavor
 
 Basically ripped everything out to add this as a submodule in android studio, but not as a module.
 
