@@ -74,7 +74,7 @@ public final class HttpsURLConnectionImpl extends DelegatingHttpsURLConnection {
 	// return delegate.getContentLengthLong();
 	// }
 
-	@TargetApi(16)
+	@TargetApi(19)
 	@Override
 	public void setFixedLengthStreamingMode(long contentLength) {
 		delegate.setFixedLengthStreamingMode(contentLength);
