@@ -1,0 +1,14 @@
+apply plugin: 'java'
+
+sourceSets {
+    main.java.srcDirs += 'okhttp/src/main/java'
+    main.java.srcDirs += 'okhttp/src/main/java-templates'
+
+    main.java.srcDirs += 'okhttp-urlconnection/src/main/java'
+
+}
+
+dependencies {
+    compile fileTree(dir: 'libs', include: ['*.jar'])
+    compile project(':okio')
+}
