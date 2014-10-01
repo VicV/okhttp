@@ -16,62 +16,71 @@
  */
 package com.squareup.okhttp.internal.huc;
 
+import android.annotation.TargetApi;
+
 import com.squareup.okhttp.Handshake;
 import com.squareup.okhttp.OkHttpClient;
+
 import java.net.URL;
+
 import javax.net.ssl.HostnameVerifier;
 import javax.net.ssl.SSLSocketFactory;
 
 public final class HttpsURLConnectionImpl extends DelegatingHttpsURLConnection {
-  private final HttpURLConnectionImpl delegate;
+	private final HttpURLConnectionImpl delegate;
 
-  public HttpsURLConnectionImpl(URL url, OkHttpClient client) {
-    this(new HttpURLConnectionImpl(url, client));
-  }
+	public HttpsURLConnectionImpl(URL url, OkHttpClient client) {
+		this(new HttpURLConnectionImpl(url, client));
+	}
 
-  public HttpsURLConnectionImpl(HttpURLConnectionImpl delegate) {
-    super(delegate);
-    this.delegate = delegate;
-  }
+	public HttpsURLConnectionImpl(HttpURLConnectionImpl delegate) {
+		super(delegate);
+		this.delegate = delegate;
+	}
 
-  @Override protected Handshake handshake() {
-    if (delegate.httpEngine == null) {
-      throw new IllegalStateException("Connection has not yet been established");
-    }
+	@Override
+	protected Handshake handshake() {
+		if (delegate.httpEngine == null) {
+			throw new IllegalStateException("Connection has not yet been established");
+		}
 
-    // If there's a response, get the handshake from there so that caching
-    // works. Otherwise get the handshake from the connection because we might
-    // have not connected yet.
-    return delegate.httpEngine.hasResponse()
-        ? delegate.httpEngine.getResponse().handshake()
-        : delegate.handshake;
-  }
+		// If there's a response, get the handshake from there so that caching
+		// works. Otherwise get the handshake from the connection because we might
+		// have not connected yet.
+		return delegate.httpEngine.hasResponse() ? delegate.httpEngine.getResponse().handshake() : delegate.handshake;
+	}
 
-  @Override public void setHostnameVerifier(HostnameVerifier hostnameVerifier) {
-    delegate.client.setHostnameVerifier(hostnameVerifier);
-  }
+	@Override
+	public void setHostnameVerifier(HostnameVerifier hostnameVerifier) {
+		delegate.client.setHostnameVerifier(hostnameVerifier);
+	}
 
-  @Override public HostnameVerifier getHostnameVerifier() {
-    return delegate.client.getHostnameVerifier();
-  }
+	@Override
+	public HostnameVerifier getHostnameVerifier() {
+		return delegate.client.getHostnameVerifier();
+	}
 
-  @Override public void setSSLSocketFactory(SSLSocketFactory sslSocketFactory) {
-    delegate.client.setSslSocketFactory(sslSocketFactory);
-  }
+	@Override
+	public void setSSLSocketFactory(SSLSocketFactory sslSocketFactory) {
+		delegate.client.setSslSocketFactory(sslSocketFactory);
+	}
 
-  @Override public SSLSocketFactory getSSLSocketFactory() {
-    return delegate.client.getSslSocketFactory();
-  }
+	@Override
+	public SSLSocketFactory getSSLSocketFactory() {
+		return delegate.client.getSslSocketFactory();
+	}
 
-  @Override public long getContentLengthLong() {
-    return delegate.getContentLengthLong();
-  }
+	// @Override public long getContentLengthLong() {
+	// return delegate.getContentLengthLong();
+	// }
 
-  @Override public void setFixedLengthStreamingMode(long contentLength) {
-    delegate.setFixedLengthStreamingMode(contentLength);
-  }
+	@TargetApi(16)
+	@Override
+	public void setFixedLengthStreamingMode(long contentLength) {
+		delegate.setFixedLengthStreamingMode(contentLength);
+	}
 
-  @Override public long getHeaderFieldLong(String field, long defaultValue) {
-    return delegate.getHeaderFieldLong(field, defaultValue);
-  }
+	// @Override public long getHeaderFieldLong(String field, long defaultValue) {
+	// return delegate.getHeaderFieldLong(field, defaultValue);
+	// }
 }
