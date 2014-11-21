@@ -16,16 +16,18 @@
 package com.squareup.okhttp;
 
 import com.squareup.okhttp.internal.NamedRunnable;
-import com.squareup.okhttp.internal.Util;
 import com.squareup.okhttp.internal.http.HttpEngine;
-import com.squareup.okhttp.internal.http.HttpMethod;
 import com.squareup.okhttp.internal.http.OkHeaders;
 import com.squareup.okhttp.internal.http.RetryableSink;
 import java.io.IOException;
+import java.net.MalformedURLException;
 import java.net.ProtocolException;
+import java.net.URL;
+import java.util.logging.Level;
 import okio.BufferedSink;
 import okio.BufferedSource;
 
+import static com.squareup.okhttp.internal.Internal.logger;
 import static com.squareup.okhttp.internal.http.HttpEngine.MAX_REDIRECTS;
 
 /**
@@ -80,7 +82,6 @@ public class Call {
     try {
       client.getDispatcher().executed(this);
       Response result = getResponse();
-      System.out.println("releasing");
       engine.releaseConnection(); // Transfer ownership of the body to the caller.
       if (result == null) throw new IOException("Canceled");
       return result;
@@ -123,6 +124,10 @@ public class Call {
     if (engine != null) engine.disconnect();
   }
 
+  public boolean isCanceled() {
+    return canceled;
+  }
+
   final class AsyncCall extends NamedRunnable {
     private final Callback responseCallback;
 
@@ -143,6 +148,10 @@ public class Call {
       return request.tag();
     }
 
+    void cancel() {
+      Call.this.cancel();
+    }
+
     Call get() {
       return Call.this;
     }
@@ -160,11 +169,29 @@ public class Call {
           responseCallback.onResponse(response);
         }
       } catch (IOException e) {
-        if (signalledCallback) throw new RuntimeException(e); // Do not signal the callback twice!
-        responseCallback.onFailure(request, e);
+        if (signalledCallback) {
+          // Do not signal the callback twice!
+          logger.log(Level.INFO, "Callback failure for " + toLoggableString(), e);
+        } else {
+          responseCallback.onFailure(request, e);
+        }
       } finally {
         client.getDispatcher().finished(this);
       }
+    }
+  }
+
+  /**
+   * Returns a string that describes this call. Doesn't include a full URL as that might contain
+   * sensitive information.
+   */
+  private String toLoggableString() {
+    String string = canceled ? "canceled call" : "call";
+    try {
+      String redactedUrl = new URL(request.url(), "/...").toString();
+      return string + " to " + redactedUrl;
+    } catch (MalformedURLException e) {
+      return string;
     }
   }
 
@@ -194,8 +221,6 @@ public class Call {
       }
 
       request = requestBuilder.build();
-    } else if (HttpMethod.hasRequestBody(request.method())) {
-      requestBodyOut = Util.emptySink();
     }
 
     // Create the initial HTTP engine. Retries and redirects need new engine for each attempt.

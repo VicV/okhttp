@@ -16,6 +16,7 @@
 package com.squareup.okhttp;
 
 import com.squareup.okhttp.internal.Platform;
+import com.squareup.okhttp.internal.Util;
 import com.squareup.okhttp.internal.http.HttpMethod;
 import java.io.IOException;
 import java.net.MalformedURLException;
@@ -185,6 +186,17 @@ public final class Request {
       return this;
     }
 
+    /**
+     * Sets this request's {@code Cache-Control} header, replacing any cache
+     * control headers already present. If {@code cacheControl} doesn't define
+     * any directives, this clears this request's cache-control headers.
+     */
+    public Builder cacheControl(CacheControl cacheControl) {
+      String value = cacheControl.toString();
+      if (value.isEmpty()) return removeHeader("Cache-Control");
+      return header("Cache-Control", value);
+    }
+
     public Builder get() {
       return method("GET", null);
     }
@@ -213,8 +225,11 @@ public final class Request {
       if (method == null || method.length() == 0) {
         throw new IllegalArgumentException("method == null || method.length() == 0");
       }
-      if (body != null && !HttpMethod.hasRequestBody(method)) {
+      if (body != null && !HttpMethod.permitsRequestBody(method)) {
         throw new IllegalArgumentException("method " + method + " must not have a request body.");
+      }
+      if (body == null && HttpMethod.permitsRequestBody(method)) {
+        body = RequestBody.create(null, Util.EMPTY_BYTE_ARRAY);
       }
       this.method = method;
       this.body = body;

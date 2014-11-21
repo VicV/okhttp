@@ -17,6 +17,7 @@ package com.squareup.okhttp;
 
 import com.squareup.okhttp.internal.Internal;
 import com.squareup.okhttp.internal.InternalCache;
+import com.squareup.okhttp.internal.Network;
 import com.squareup.okhttp.internal.RouteDatabase;
 import com.squareup.okhttp.internal.Util;
 import com.squareup.okhttp.internal.http.AuthenticatorAdapter;
@@ -48,6 +49,12 @@ import javax.net.ssl.SSLSocketFactory;
  * safely modified with further configuration changes.
  */
 public class OkHttpClient implements Cloneable {
+  private static final List<Protocol> DEFAULT_PROTOCOLS = Util.immutableList(
+      Protocol.HTTP_2, Protocol.SPDY_3, Protocol.HTTP_1_1);
+
+  private static final List<ConnectionSpec> DEFAULT_CONNECTION_SPECS = Util.immutableList(
+      ConnectionSpec.MODERN_TLS, ConnectionSpec.COMPATIBLE_TLS, ConnectionSpec.CLEARTEXT);
+
   static {
     Internal.instance = new Internal() {
       @Override public Transport newTransport(
@@ -99,6 +106,14 @@ public class OkHttpClient implements Cloneable {
         return client.routeDatabase();
       }
 
+      @Override public Network network(OkHttpClient client) {
+        return client.network;
+      }
+
+      @Override public void setNetwork(OkHttpClient client, Network network) {
+        client.network = network;
+      }
+
       @Override public void connectAndSetOwner(OkHttpClient client, Connection connection,
           HttpEngine owner, Request request) throws IOException {
         connection.connectAndSetOwner(client, owner, request);
@@ -113,6 +128,7 @@ public class OkHttpClient implements Cloneable {
   private Dispatcher dispatcher;
   private Proxy proxy;
   private List<Protocol> protocols;
+  private List<ConnectionSpec> connectionSpecs;
   private ProxySelector proxySelector;
   private CookieHandler cookieHandler;
 
@@ -123,9 +139,10 @@ public class OkHttpClient implements Cloneable {
   private SocketFactory socketFactory;
   private SSLSocketFactory sslSocketFactory;
   private HostnameVerifier hostnameVerifier;
+  private CertificatePinner certificatePinner;
   private Authenticator authenticator;
   private ConnectionPool connectionPool;
-  private HostResolver hostResolver;
+  private Network network;
   private boolean followSslRedirects = true;
   private boolean followRedirects = true;
   private int connectTimeout;
@@ -138,24 +155,27 @@ public class OkHttpClient implements Cloneable {
   }
 
   private OkHttpClient(OkHttpClient okHttpClient) {
-    this.routeDatabase = okHttpClient.routeDatabase();
-    this.dispatcher = okHttpClient.getDispatcher();
-    this.proxy = okHttpClient.getProxy();
-    this.protocols = okHttpClient.getProtocols();
-    this.proxySelector = okHttpClient.getProxySelector();
-    this.cookieHandler = okHttpClient.getCookieHandler();
-    this.cache = okHttpClient.getCache();
+    this.routeDatabase = okHttpClient.routeDatabase;
+    this.dispatcher = okHttpClient.dispatcher;
+    this.proxy = okHttpClient.proxy;
+    this.protocols = okHttpClient.protocols;
+    this.connectionSpecs = okHttpClient.connectionSpecs;
+    this.proxySelector = okHttpClient.proxySelector;
+    this.cookieHandler = okHttpClient.cookieHandler;
+    this.cache = okHttpClient.cache;
     this.internalCache = cache != null ? cache.internalCache : okHttpClient.internalCache;
-    this.socketFactory = okHttpClient.getSocketFactory();
-    this.sslSocketFactory = okHttpClient.getSslSocketFactory();
-    this.hostnameVerifier = okHttpClient.getHostnameVerifier();
-    this.authenticator = okHttpClient.getAuthenticator();
-    this.connectionPool = okHttpClient.getConnectionPool();
-    this.followSslRedirects = okHttpClient.getFollowSslRedirects();
-    this.followRedirects = okHttpClient.getFollowRedirects();
-    this.connectTimeout = okHttpClient.getConnectTimeout();
-    this.readTimeout = okHttpClient.getReadTimeout();
-    this.writeTimeout = okHttpClient.getWriteTimeout();
+    this.socketFactory = okHttpClient.socketFactory;
+    this.sslSocketFactory = okHttpClient.sslSocketFactory;
+    this.hostnameVerifier = okHttpClient.hostnameVerifier;
+    this.certificatePinner = okHttpClient.certificatePinner;
+    this.authenticator = okHttpClient.authenticator;
+    this.connectionPool = okHttpClient.connectionPool;
+    this.network = okHttpClient.network;
+    this.followSslRedirects = okHttpClient.followSslRedirects;
+    this.followRedirects = okHttpClient.followRedirects;
+    this.connectTimeout = okHttpClient.connectTimeout;
+    this.readTimeout = okHttpClient.readTimeout;
+    this.writeTimeout = okHttpClient.writeTimeout;
   }
 
   /**
@@ -312,9 +332,7 @@ public class OkHttpClient implements Cloneable {
    * Sets the verifier used to confirm that response certificates apply to
    * requested hostnames for HTTPS connections.
    *
-   * <p>If unset, the
-   * {@link javax.net.ssl.HttpsURLConnection#getDefaultHostnameVerifier()
-   * system-wide default} hostname verifier will be used.
+   * <p>If unset, a default hostname verifier will be used.
    */
   public final OkHttpClient setHostnameVerifier(HostnameVerifier hostnameVerifier) {
     this.hostnameVerifier = hostnameVerifier;
@@ -323,6 +341,21 @@ public class OkHttpClient implements Cloneable {
 
   public final HostnameVerifier getHostnameVerifier() {
     return hostnameVerifier;
+  }
+
+  /**
+   * Sets the certificate pinner that constrains which certificates are trusted.
+   * By default HTTPS connections rely on only the {@link #setSslSocketFactory
+   * SSL socket factory} to establish trust. Pinning certificates avoids the
+   * need to trust certificate authorities.
+   */
+  public final OkHttpClient setCertificatePinner(CertificatePinner certificatePinner) {
+    this.certificatePinner = certificatePinner;
+    return this;
+  }
+
+  public final CertificatePinner getCertificatePinner() {
+    return certificatePinner;
   }
 
   /**
@@ -372,12 +405,7 @@ public class OkHttpClient implements Cloneable {
     return followSslRedirects;
   }
 
-  /**
-   * Configure this client to follow redirects.
-   *
-   * <p>If unset, redirects will not be followed. This is the equivalent as the
-   * built-in {@code HttpURLConnection}'s default.
-   */
+  /** Configure this client to follow redirects. If unset, redirects be followed. */
   public final void setFollowRedirects(boolean followRedirects) {
     this.followRedirects = followRedirects;
   }
@@ -427,13 +455,21 @@ public class OkHttpClient implements Cloneable {
    * <a href="http://tools.ietf.org/html/draft-ietf-tls-applayerprotoneg">ALPN</a>
    * will be used to negotiate a transport.
    *
+   * <p>{@link Protocol#HTTP_1_0} is not supported in this set. Requests are
+   * initiated with {@code HTTP/1.1} only. If the server responds with {@code
+   * HTTP/1.0}, that will be exposed by {@link Response#protocol()}.
+   *
    * @param protocols the protocols to use, in order of preference. The list
-   *     must contain {@link Protocol#HTTP_1_1}. It must not contain null.
+   *     must contain {@link Protocol#HTTP_1_1}. It must not contain null or
+   *     {@link Protocol#HTTP_1_0}.
    */
   public final OkHttpClient setProtocols(List<Protocol> protocols) {
     protocols = Util.immutableList(protocols);
     if (!protocols.contains(Protocol.HTTP_1_1)) {
       throw new IllegalArgumentException("protocols doesn't contain http/1.1: " + protocols);
+    }
+    if (protocols.contains(Protocol.HTTP_1_0)) {
+      throw new IllegalArgumentException("protocols must not contain http/1.0: " + protocols);
     }
     if (protocols.contains(null)) {
       throw new IllegalArgumentException("protocols must not contain null");
@@ -446,17 +482,13 @@ public class OkHttpClient implements Cloneable {
     return protocols;
   }
 
-  /*
-   * Sets the {@code HostResolver} that will be used by this client to resolve
-   * hostnames to IP addresses.
-   */
-  public OkHttpClient setHostResolver(HostResolver hostResolver) {
-    this.hostResolver = hostResolver;
+  public final OkHttpClient setConnectionSpecs(List<ConnectionSpec> connectionSpecs) {
+    this.connectionSpecs = Util.immutableList(connectionSpecs);
     return this;
   }
 
-  public HostResolver getHostResolver() {
-    return hostResolver;
+  public final List<ConnectionSpec> getConnectionSpecs() {
+    return connectionSpecs;
   }
 
   /**
@@ -496,6 +528,9 @@ public class OkHttpClient implements Cloneable {
     if (result.hostnameVerifier == null) {
       result.hostnameVerifier = OkHostnameVerifier.INSTANCE;
     }
+    if (result.certificatePinner == null) {
+      result.certificatePinner = CertificatePinner.DEFAULT;
+    }
     if (result.authenticator == null) {
       result.authenticator = AuthenticatorAdapter.INSTANCE;
     }
@@ -503,10 +538,13 @@ public class OkHttpClient implements Cloneable {
       result.connectionPool = ConnectionPool.getDefault();
     }
     if (result.protocols == null) {
-      result.protocols = Util.immutableList(Protocol.HTTP_2, Protocol.SPDY_3, Protocol.HTTP_1_1);
+      result.protocols = DEFAULT_PROTOCOLS;
     }
-    if (result.hostResolver == null) {
-      result.hostResolver = HostResolver.DEFAULT;
+    if (result.connectionSpecs == null) {
+      result.connectionSpecs = DEFAULT_CONNECTION_SPECS;
+    }
+    if (result.network == null) {
+      result.network = Network.DEFAULT;
     }
     return result;
   }

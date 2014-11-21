@@ -28,7 +28,6 @@ import com.squareup.okhttp.ResponseBody;
 import com.squareup.okhttp.Route;
 import com.squareup.okhttp.internal.Internal;
 import com.squareup.okhttp.internal.InternalCache;
-import com.squareup.okhttp.internal.Util;
 import com.squareup.okhttp.internal.Version;
 
 import java.io.IOException;
@@ -43,7 +42,7 @@ import java.util.List;
 import java.util.Map;
 
 import javax.net.ssl.SSLHandshakeException;
-
+import javax.net.ssl.SSLPeerUnverifiedException;
 import okio.Buffer;
 import okio.BufferedSink;
 import okio.BufferedSource;
@@ -56,6 +55,7 @@ import static com.squareup.okhttp.internal.Util.closeQuietly;
 import static com.squareup.okhttp.internal.Util.getDefaultPort;
 import static com.squareup.okhttp.internal.Util.getEffectivePort;
 import static com.squareup.okhttp.internal.http.StatusLine.HTTP_CONTINUE;
+import static com.squareup.okhttp.internal.http.StatusLine.HTTP_PERM_REDIRECT;
 import static com.squareup.okhttp.internal.http.StatusLine.HTTP_TEMP_REDIRECT;
 import static java.net.HttpURLConnection.HTTP_MOVED_PERM;
 import static java.net.HttpURLConnection.HTTP_MOVED_TEMP;
@@ -243,8 +243,28 @@ public final class HttpEngine {
 
       // Create a request body if we don't have one already. We'll already have
       // one if we're retrying a failed POST.
-      if (hasRequestBody() && requestBodyOut == null) {
-        requestBodyOut = transport.createRequestBody(request);
+      if (permitsRequestBody() && requestBodyOut == null) {
+        long contentLength = OkHeaders.contentLength(request);
+        if (bufferRequestBody) {
+          if (contentLength > Integer.MAX_VALUE) {
+            throw new IllegalStateException("Use setFixedLengthStreamingMode() or "
+                + "setChunkedStreamingMode() for requests larger than 2 GiB.");
+          }
+
+          if (contentLength != -1) {
+            // Buffer a request body of a known length.
+            transport.writeRequestHeaders(request);
+            requestBodyOut = new RetryableSink((int) contentLength);
+          } else {
+            // Buffer a request body of an unknown length. Don't write request
+            // headers until the entire body is ready; otherwise we can't set the
+            // Content-Length header correctly.
+            requestBodyOut = new RetryableSink();
+          }
+        } else {
+          transport.writeRequestHeaders(request);
+          requestBodyOut = transport.createRequestBody(request, contentLength);
+        }
       }
 
     } else {
@@ -306,9 +326,8 @@ public final class HttpEngine {
     sentRequestMillis = System.currentTimeMillis();
   }
 
-  boolean hasRequestBody() {
-    return HttpMethod.hasRequestBody(userRequest.method())
-        && !Util.emptySink().equals(requestBodyOut);
+  boolean permitsRequestBody() {
+    return HttpMethod.permitsRequestBody(userRequest.method());
   }
 
   /** Returns the request body or null if this request doesn't have a body. */
@@ -390,8 +409,8 @@ public final class HttpEngine {
   private boolean isRecoverable(IOException e) {
     // If the problem was a CertificateException from the X509TrustManager,
     // do not retry, we didn't have an abrupt server-initiated exception.
-    boolean sslFailure =
-        e instanceof SSLHandshakeException && e.getCause() instanceof CertificateException;
+    boolean sslFailure = e instanceof SSLPeerUnverifiedException
+        || (e instanceof SSLHandshakeException && e.getCause() instanceof CertificateException);
     boolean protocolFailure = e instanceof ProtocolException;
     return !sslFailure && !protocolFailure;
   }
@@ -638,7 +657,7 @@ public final class HttpEngine {
       } else {
         requestBodyOut.close();
       }
-      if (requestBodyOut instanceof RetryableSink && !Util.emptySink().equals(requestBodyOut)) {
+      if (requestBodyOut instanceof RetryableSink) {
         transport.writeRequestBody((RetryableSink) requestBodyOut);
       }
     }
@@ -734,8 +753,8 @@ public final class HttpEngine {
     for (int i = 0; i < cachedHeaders.size(); i++) {
       String fieldName = cachedHeaders.name(i);
       String value = cachedHeaders.value(i);
-      if ("Warning".equals(fieldName) && value.startsWith("1")) {
-        continue; // drop 100-level freshness warnings
+      if ("Warning".equalsIgnoreCase(fieldName) && value.startsWith("1")) {
+        continue; // Drop 100-level freshness warnings.
       }
       if (!OkHeaders.isEndToEnd(fieldName) || networkHeaders.get(fieldName) == null) {
         result.add(fieldName, value);
@@ -744,6 +763,9 @@ public final class HttpEngine {
 
     for (int i = 0; i < networkHeaders.size(); i++) {
       String fieldName = networkHeaders.name(i);
+      if ("Content-Length".equalsIgnoreCase(fieldName)) {
+        continue; // Ignore content-length headers of validating responses.
+      }
       if (OkHeaders.isEndToEnd(fieldName)) {
         result.add(fieldName, networkHeaders.value(i));
       }
@@ -780,11 +802,12 @@ public final class HttpEngine {
       case HTTP_UNAUTHORIZED:
         return OkHeaders.processAuthHeader(client.getAuthenticator(), userResponse, selectedProxy);
 
+      case HTTP_PERM_REDIRECT:
       case HTTP_TEMP_REDIRECT:
-        // "If the 307 status code is received in response to a request other than GET or HEAD,
-        // the user agent MUST NOT automatically redirect the request"
+        // "If the 307 or 308 status code is received in response to a request other than GET
+        // or HEAD, the user agent MUST NOT automatically redirect the request"
         if (!userRequest.method().equals("GET") && !userRequest.method().equals("HEAD")) {
-          return null;
+            return null;
         }
         // fall-through
       case HTTP_MULT_CHOICE:
@@ -807,7 +830,7 @@ public final class HttpEngine {
 
         // Redirects don't include a request body.
         Request.Builder requestBuilder = userRequest.newBuilder();
-        if (HttpMethod.hasRequestBody(userRequest.method())) {
+        if (HttpMethod.permitsRequestBody(userRequest.method())) {
           requestBuilder.method("GET", null);
           requestBuilder.removeHeader("Transfer-Encoding");
           requestBuilder.removeHeader("Content-Length");

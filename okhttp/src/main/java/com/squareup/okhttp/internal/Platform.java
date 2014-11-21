@@ -31,12 +31,14 @@ import java.net.URL;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.logging.Level;
-import java.util.logging.Logger;
 import javax.net.ssl.SSLSocket;
 import okio.Buffer;
 
+import static com.squareup.okhttp.internal.Internal.logger;
+
 /**
  * Access to Platform-specific features necessary for SPDY and advanced TLS.
+ * This includes Server Name Indication (SNI) and session tickets.
  *
  * <h3>ALPN and NPN</h3>
  * This class uses TLS extensions ALPN and NPN to negotiate the upgrade from
@@ -84,29 +86,18 @@ public class Platform {
   }
 
   /**
-   * Configure the TLS connection to use {@code tlsVersion}. We also bundle
-   * certain extensions with certain versions. In particular, we enable Server
-   * Name Indication (SNI) and Next Protocol Negotiation (NPN) with TLSv1 on
-   * platforms that support them.
+   * Configure TLS extensions on {@code sslSocket} for {@code route}.
+   *
+   * @param hostname non-null for client-side handshakes; null for
+   *     server-side handshakes.
    */
-  public void configureTls(SSLSocket socket, String uriHost, String tlsVersion) {
-    // We don't call setEnabledProtocols("TLSv1") on the assumption that that's
-    // the default. TODO: confirm this and support more TLS versions.
-    if (tlsVersion.equals("SSLv3")) {
-      socket.setEnabledProtocols(new String[] {"SSLv3"});
-    }
+  public void configureTlsExtensions(SSLSocket sslSocket, String hostname,
+      List<Protocol> protocols) {
   }
 
   /** Returns the negotiated protocol, or null if no protocol was negotiated. */
   public String getSelectedProtocol(SSLSocket socket) {
     return null;
-  }
-
-  /**
-   * Sets client-supported protocols on a socket to send to a server. The
-   * protocols are only sent if the socket implementation supports ALPN or NPN.
-   */
-  public void setProtocols(SSLSocket socket, List<Protocol> protocols) {
   }
 
   public void connectSocket(Socket socket, InetSocketAddress address,
@@ -117,20 +108,13 @@ public class Platform {
   /** Attempt to match the host runtime to a capable Platform implementation. */
   private static Platform findPlatform() {
     // Attempt to find Android 2.3+ APIs.
-    Class<?> openSslSocketClass;
-    Method setUseSessionTickets;
-    Method setHostname;
     try {
       try {
-        openSslSocketClass = Class.forName("com.android.org.conscrypt.OpenSSLSocketImpl");
+        Class.forName("com.android.org.conscrypt.OpenSSLSocketImpl");
       } catch (ClassNotFoundException ignored) {
         // Older platform before being unbundled.
-        openSslSocketClass = Class.forName(
-            "org.apache.harmony.xnet.provider.jsse.OpenSSLSocketImpl");
+        Class.forName("org.apache.harmony.xnet.provider.jsse.OpenSSLSocketImpl");
       }
-
-      setUseSessionTickets = openSslSocketClass.getMethod("setUseSessionTickets", boolean.class);
-      setHostname = openSslSocketClass.getMethod("setHostname", String.class);
 
       // Attempt to find Android 4.0+ APIs.
       Method trafficStatsTagSocket = null;
@@ -143,22 +127,9 @@ public class Platform {
       } catch (NoSuchMethodException ignored) {
       }
 
-      // Attempt to find Android 4.1+ APIs.
-      Method setNpnProtocols = null;
-      Method getNpnSelectedProtocol = null;
-      try {
-        setNpnProtocols = openSslSocketClass.getMethod("setNpnProtocols", byte[].class);
-        getNpnSelectedProtocol = openSslSocketClass.getMethod("getNpnSelectedProtocol");
-      } catch (NoSuchMethodException ignored) {
-      }
-
-      return new Android(openSslSocketClass, setUseSessionTickets, setHostname,
-          trafficStatsTagSocket, trafficStatsUntagSocket, setNpnProtocols,
-          getNpnSelectedProtocol);
+      return new Android(trafficStatsTagSocket, trafficStatsUntagSocket);
     } catch (ClassNotFoundException ignored) {
       // This isn't an Android runtime.
-    } catch (NoSuchMethodException ignored) {
-      // This isn't Android 2.3 or better.
     }
 
     try { // to find the Jetty's ALPN or NPN extension for OpenJDK.
@@ -189,29 +160,33 @@ public class Platform {
    * name indication (SNI). Versions 4.1 supports NPN.
    */
   private static class Android extends Platform {
-    // Non-null.
-    protected final Class<?> openSslSocketClass;
-    private final Method setUseSessionTickets;
-    private final Method setHostname;
+
+    // setUseSessionTickets(boolean)
+    private static final OptionalMethod<Socket> SET_USE_SESSION_TICKETS =
+        new OptionalMethod<Socket>(null, "setUseSessionTickets", Boolean.TYPE);
+    // setHostname(String)
+    private static final OptionalMethod<Socket> SET_HOSTNAME =
+        new OptionalMethod<Socket>(null, "setHostname", String.class);
+    // byte[] getAlpnSelectedProtocol()
+    private static final OptionalMethod<Socket> GET_ALPN_SELECTED_PROTOCOL =
+        new OptionalMethod<Socket>(byte[].class, "getAlpnSelectedProtocol");
+    // setAlpnSelectedProtocol(byte[])
+    private static final OptionalMethod<Socket> SET_ALPN_PROTOCOLS =
+        new OptionalMethod<Socket>(null, "setAlpnProtocols", byte[].class);
+    // byte[] getNpnSelectedProtocol()
+    private static final OptionalMethod<Socket> GET_NPN_SELECTED_PROTOCOL =
+        new OptionalMethod<Socket>(byte[].class, "getNpnSelectedProtocol");
+    // setNpnSelectedProtocol(byte[])
+    private static final OptionalMethod<Socket> SET_NPN_PROTOCOLS =
+        new OptionalMethod<Socket>(null, "setNpnProtocols", byte[].class);
 
     // Non-null on Android 4.0+.
     private final Method trafficStatsTagSocket;
     private final Method trafficStatsUntagSocket;
 
-    // Non-null on Android 4.1+.
-    private final Method setNpnProtocols;
-    private final Method getNpnSelectedProtocol;
-
-    private Android(Class<?> openSslSocketClass, Method setUseSessionTickets, Method setHostname,
-        Method trafficStatsTagSocket, Method trafficStatsUntagSocket, Method setNpnProtocols,
-        Method getNpnSelectedProtocol) {
-      this.openSslSocketClass = openSslSocketClass;
-      this.setUseSessionTickets = setUseSessionTickets;
-      this.setHostname = setHostname;
+    private Android(Method trafficStatsTagSocket, Method trafficStatsUntagSocket) {
       this.trafficStatsTagSocket = trafficStatsTagSocket;
       this.trafficStatsUntagSocket = trafficStatsUntagSocket;
-      this.setNpnProtocols = setNpnProtocols;
-      this.getNpnSelectedProtocol = getNpnSelectedProtocol;
     }
 
     @Override public void connectSocket(Socket socket, InetSocketAddress address,
@@ -227,46 +202,53 @@ public class Platform {
       }
     }
 
-    @Override public void configureTls(SSLSocket socket, String uriHost, String tlsVersion) {
-      super.configureTls(socket, uriHost, tlsVersion);
-
-      if (tlsVersion.equals("TLSv1") && openSslSocketClass.isInstance(socket)) {
-        try {
-          setUseSessionTickets.invoke(socket, true);
-          setHostname.invoke(socket, uriHost);
-        } catch (InvocationTargetException e) {
-          throw new RuntimeException(e);
-        } catch (IllegalAccessException e) {
-          throw new AssertionError(e);
-        }
+    @Override public void configureTlsExtensions(
+        SSLSocket sslSocket, String hostname, List<Protocol> protocols) {
+      // Enable SNI and session tickets.
+      if (hostname != null) {
+        SET_USE_SESSION_TICKETS.invokeOptionalWithoutCheckedException(sslSocket, true);
+        SET_HOSTNAME.invokeOptionalWithoutCheckedException(sslSocket, hostname);
       }
-    }
 
-    @Override public void setProtocols(SSLSocket socket, List<Protocol> protocols) {
-      if (setNpnProtocols == null) return;
-      if (!openSslSocketClass.isInstance(socket)) return;
-      try {
-        Object[] parameters = { concatLengthPrefixed(protocols) };
-        setNpnProtocols.invoke(socket, parameters);
-      } catch (IllegalAccessException e) {
-        throw new AssertionError(e);
-      } catch (InvocationTargetException e) {
-        throw new RuntimeException(e);
+      // Enable NPN / ALPN.
+      boolean alpnSupported = SET_ALPN_PROTOCOLS.isSupported(sslSocket);
+      boolean npnSupported = SET_NPN_PROTOCOLS.isSupported(sslSocket);
+      if (!(alpnSupported || npnSupported)) {
+        return;
+      }
+
+      Object[] parameters = { concatLengthPrefixed(protocols) };
+      if (alpnSupported) {
+        SET_ALPN_PROTOCOLS.invokeWithoutCheckedException(sslSocket, parameters);
+      }
+      if (npnSupported) {
+        SET_NPN_PROTOCOLS.invokeWithoutCheckedException(sslSocket, parameters);
       }
     }
 
     @Override public String getSelectedProtocol(SSLSocket socket) {
-      if (getNpnSelectedProtocol == null) return null;
-      if (!openSslSocketClass.isInstance(socket)) return null;
-      try {
-        byte[] npnResult = (byte[]) getNpnSelectedProtocol.invoke(socket);
-        if (npnResult == null) return null;
-        return new String(npnResult, Util.UTF_8);
-      } catch (InvocationTargetException e) {
-        throw new RuntimeException(e);
-      } catch (IllegalAccessException e) {
-        throw new AssertionError(e);
+      boolean alpnSupported = GET_ALPN_SELECTED_PROTOCOL.isSupported(socket);
+      boolean npnSupported = GET_NPN_SELECTED_PROTOCOL.isSupported(socket);
+      if (!(alpnSupported || npnSupported)) {
+        return null;
       }
+
+      // Prefer ALPN's result if it is present.
+      if (alpnSupported) {
+        byte[] alpnResult =
+            (byte[]) GET_ALPN_SELECTED_PROTOCOL.invokeWithoutCheckedException(socket);
+        if (alpnResult != null) {
+          return new String(alpnResult, Util.UTF_8);
+        }
+      }
+      if (npnSupported) {
+        byte[] npnResult =
+            (byte[]) GET_NPN_SELECTED_PROTOCOL.invokeWithoutCheckedException(socket);
+        if (npnResult != null) {
+          return new String(npnResult, Util.UTF_8);
+        }
+      }
+      return null;
     }
 
     @Override public void tagSocket(Socket socket) throws SocketException {
@@ -277,7 +259,7 @@ public class Platform {
       } catch (IllegalAccessException e) {
         throw new RuntimeException(e);
       } catch (InvocationTargetException e) {
-        throw new RuntimeException(e);
+        throw new RuntimeException(e.getCause());
       }
     }
 
@@ -289,7 +271,7 @@ public class Platform {
       } catch (IllegalAccessException e) {
         throw new RuntimeException(e);
       } catch (InvocationTargetException e) {
-        throw new RuntimeException(e);
+        throw new RuntimeException(e.getCause());
       }
     }
   }
@@ -312,17 +294,18 @@ public class Platform {
       this.serverProviderClass = serverProviderClass;
     }
 
-    @Override public void setProtocols(SSLSocket socket, List<Protocol> protocols) {
+    @Override public void configureTlsExtensions(
+        SSLSocket sslSocket, String hostname, List<Protocol> protocols) {
+      List<String> names = new ArrayList<>(protocols.size());
+      for (int i = 0, size = protocols.size(); i < size; i++) {
+        Protocol protocol = protocols.get(i);
+        if (protocol == Protocol.HTTP_1_0) continue; // No HTTP/1.0 for NPN or ALPN.
+        names.add(protocol.toString());
+      }
       try {
-        List<String> names = new ArrayList<>(protocols.size());
-        for (int i = 0, size = protocols.size(); i < size; i++) {
-          Protocol protocol = protocols.get(i);
-          if (protocol == Protocol.HTTP_1_0) continue; // No HTTP/1.0 for NPN or ALPN.
-          names.add(protocol.toString());
-        }
         Object provider = Proxy.newProxyInstance(Platform.class.getClassLoader(),
             new Class[] { clientProviderClass, serverProviderClass }, new JettyNegoProvider(names));
-        putMethod.invoke(null, socket, provider);
+        putMethod.invoke(null, sslSocket, provider);
       } catch (InvocationTargetException e) {
         throw new AssertionError(e);
       } catch (IllegalAccessException e) {
@@ -335,9 +318,8 @@ public class Platform {
         JettyNegoProvider provider =
             (JettyNegoProvider) Proxy.getInvocationHandler(getMethod.invoke(null, socket));
         if (!provider.unsupported && provider.selected == null) {
-          Logger logger = Logger.getLogger("com.squareup.okhttp.OkHttpClient");
           logger.log(Level.INFO, "NPN/ALPN callback dropped: SPDY and HTTP/2 are disabled. "
-                  + "Is npn-boot or alpn-boot on the boot class path?");
+              + "Is npn-boot or alpn-boot on the boot class path?");
           return null;
         }
         return provider.unsupported ? null : provider.selected;
