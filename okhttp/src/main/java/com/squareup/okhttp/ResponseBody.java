@@ -22,6 +22,7 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.Reader;
 import java.nio.charset.Charset;
+import okio.Buffer;
 import okio.BufferedSource;
 
 import static com.squareup.okhttp.internal.Util.UTF_8;
@@ -36,13 +37,13 @@ public abstract class ResponseBody implements Closeable {
    * Returns the number of bytes in that will returned by {@link #bytes}, or
    * {@link #byteStream}, or -1 if unknown.
    */
-  public abstract long contentLength();
+  public abstract long contentLength() throws IOException;
 
-  public final InputStream byteStream() {
+  public final InputStream byteStream() throws IOException {
     return source().inputStream();
   }
 
-  public abstract BufferedSource source();
+  public abstract BufferedSource source() throws IOException;
 
   public final byte[] bytes() throws IOException {
     long contentLength = contentLength();
@@ -68,7 +69,7 @@ public abstract class ResponseBody implements Closeable {
    * of the Content-Type header. If that header is either absent or lacks a
    * charset, this will attempt to decode the response body as UTF-8.
    */
-  public final Reader charStream() {
+  public final Reader charStream() throws IOException {
     Reader r = reader;
     return r != null ? r : (reader = new InputStreamReader(byteStream(), charset()));
   }
@@ -89,5 +90,47 @@ public abstract class ResponseBody implements Closeable {
 
   @Override public void close() throws IOException {
     source().close();
+  }
+
+  /**
+   * Returns a new response body that transmits {@code content}. If {@code
+   * contentType} is non-null and lacks a charset, this will use UTF-8.
+   */
+  public static ResponseBody create(MediaType contentType, String content) {
+    Charset charset = Util.UTF_8;
+    if (contentType != null) {
+      charset = contentType.charset();
+      if (charset == null) {
+        charset = Util.UTF_8;
+        contentType = MediaType.parse(contentType + "; charset=utf-8");
+      }
+    }
+    Buffer buffer = new Buffer().writeString(content, charset);
+    return create(contentType, buffer.size(), buffer);
+  }
+
+  /** Returns a new response body that transmits {@code content}. */
+  public static ResponseBody create(final MediaType contentType, byte[] content) {
+    Buffer buffer = new Buffer().write(content);
+    return create(contentType, content.length, buffer);
+  }
+
+  /** Returns a new response body that transmits {@code content}. */
+  public static ResponseBody create(
+      final MediaType contentType, final long contentLength, final BufferedSource content) {
+    if (content == null) throw new NullPointerException("source == null");
+    return new ResponseBody() {
+      @Override public MediaType contentType() {
+        return contentType;
+      }
+
+      @Override public long contentLength() {
+        return contentLength;
+      }
+
+      @Override public BufferedSource source() {
+        return content;
+      }
+    };
   }
 }
